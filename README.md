@@ -1,54 +1,161 @@
+<div align="center">
+
 # Text-to-SQL Analytics Agent
 
-Ask a relational database a question in plain English. An agent pipeline links the question
-to the right part of the schema, writes the SQL, runs it read-only, repairs it from the
-database's own error messages when it fails, and explains the result. The Angular UI streams
-every step live and lets you review, edit and re-run the SQL next to its results.
+**Ask a database questions in plain English. Get the SQL, the results, and an explanation.**
 
+A multi-agent LLM pipeline that links your question to the right tables, writes SQL,
+runs it on a read-only connection, fixes its own mistakes, and explains the answer.
+
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![Angular](https://img.shields.io/badge/Angular-DD0031?logo=angular&logoColor=white)
+![SQLite](https://img.shields.io/badge/SQLite-003B57?logo=sqlite&logoColor=white)
+![LLM](https://img.shields.io/badge/LLM-Groq-F55036)
+![Benchmark](https://img.shields.io/badge/benchmark-BIRD%20mini--dev-6f42c1)
+
+</div>
+
+---
+
+## Highlights
+
+- **Schema linking:** narrows a large schema down to the tables the question needs, using
+  name matching, stored-value matching (`"Kochi"` → `customers.city`), the LLM, and foreign-key
+  paths for joins.
+- **Self-correction loop:** failed SQL goes back to the model with the database's exact
+  error, up to 3 attempts. Empty results and a separate **Verifier Agent** also trigger a revision.
+- **Safe by design:** the model's SQL is never trusted. A code-level validator allows only a
+  single `SELECT`, and the database is opened **read-only**, with a 10 s time limit and a 500-row cap.
+- **Transparent UI:** every agent step streams live. You can see which tables were linked,
+  every SQL attempt and why it was repaired, and edit and re-run the SQL yourself.
+- **Measured:** an evaluation harness for the **BIRD mini-dev** benchmark (execution
+  accuracy), with ablations for linking and self-correction.
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+    UI["Angular UI<br/>chat · live agent trace · SQL editor · results"]
+    API["FastAPI<br/>/chat · /chat/stream · /run-sql · /schema"]
+    LLM[("Groq LLM")]
+    DB[("SQLite<br/>read-only")]
+
+    UI -- "question" --> API
+    API -- "NDJSON stream: one event per step" --> UI
+    API <--> LLM
+    API -- "SELECT only" --> DB
 ```
-Angular UI ──POST /chat/stream (NDJSON, one event per step)──> FastAPI   agents/pipeline.py
-                                                                  │
-   1. Schema Agent          reads tables, columns, types, foreign keys, example rows
-   2. Schema Linking Agent  picks the relevant tables/columns:
-                              - names in the question     ("cities"  -> customers.city)
-                              - values stored in the DB   ("Kochi"   -> customers.city = 'Kochi')
-                              - LLM linking for meaning   ("revenue" -> orders.amount)
-                              - foreign-key closure adds the bridge tables needed for joins
-   3. SQL Agent             LLM (Groq) writes a SQLite SELECT from the linked schema
-      SQL validator         plain Python: one SELECT only, no writes
-      SQL executor          read-only database, 10 s limit, 500 rows max
-        └─ on failure: self-correction loop. The failed SQL and the exact database error
-           go back to the SQL Agent as a conversation, up to 3 attempts. A "no such
-           table/column" error widens the prompt from the linked schema to the full one.
-   4. Explanation Agent     LLM answers the question in plain English from the results
+
+### The agent pipeline
+
+```mermaid
+flowchart TD
+    Q(["User question"]) --> S["1 · Schema Agent<br/>tables, columns, keys, example rows,<br/>column descriptions, category values"]
+    S --> L["2 · Schema Linking Agent<br/>names · stored values · LLM · FK bridge tables"]
+    L --> G["3 · SQL Agent<br/>writes one SQLite SELECT"]
+    G --> V{"Safety validator<br/>single SELECT?"}
+    V -- "rejected" --> F
+    V -- "ok" --> X["Execute on read-only DB<br/>10 s limit · 500 rows"]
+    X -- "SQL error" --> F
+    X -- "empty result (checked once)" --> F
+    X -- "rows" --> R{"4 · Verifier Agent<br/>answers the question?"}
+    R -- "problem found (checked once)" --> F
+    R -- "approved" --> E["5 · Explanation Agent<br/>plain-English answer"]
+    F["Feedback to the SQL Agent<br/>failed SQL + reason, up to 3 attempts"] --> G
+    E --> A(["Answer: explanation · SQL · results · trace"])
 ```
 
-## Run it (Windows, PowerShell)
+| Step | Type | What it does |
+|---|---|---|
+| **Schema Agent** | code | Reads the database structure. Adds optional column descriptions (`database_description/` CSVs) and lists the stored values of low-cardinality text columns, so the model filters on real values instead of guessing. |
+| **Schema Linking Agent** | code + LLM | Picks the relevant tables and columns from four signals, then adds the bridge tables needed to join them. Falls back to the full schema when nothing matches. |
+| **SQL Agent** | LLM | Writes the query. On a retry it sees every earlier attempt and its feedback as a conversation. |
+| **Validator + executor** | code | One `SELECT`/`WITH` statement only, no write keywords, read-only connection, time and row limits. |
+| **Verifier Agent** | LLM | Most wrong answers *run fine*. This agent checks the result's columns, the question's hints and the query logic, and sends specific feedback if something is off. |
+| **Explanation Agent** | LLM | Answers the question in 2–4 sentences using the actual numbers. Result rows are treated as data, not instructions. |
 
-You need Python 3.10+ and Node 20+.
+A `no such table/column` error means linking left something out, so the pipeline **widens the
+prompt to the full schema** for the next attempt.
 
-### 1. Backend (terminal 1)
+---
+
+## Benchmark
+
+The agent is evaluated on **[BIRD mini-dev](https://github.com/bird-bench/mini_dev)**: 500
+questions over 11 real-world databases, at three difficulty levels.
+
+**Metric: execution accuracy (EX)**, BIRD's official metric. A prediction counts as correct
+when it returns the same set of rows as the reference SQL. Each run also reports:
+
+- **First-attempt EX:** accuracy before any self-correction, which isolates what the loop adds.
+- **Repair stats:** how many queries failed, were repaired, and ended up correct.
+- **Linking recall:** the share of questions where every table the reference SQL uses was linked.
+- **Cost:** LLM calls, tokens and seconds per question.
+
+### Results
+
+<!-- Fill this table from `python -m benchmarks.bird_eval --report` after a completed run.
+     Only report numbers from finished runs, and state the model and date. -->
+
+| Configuration | Model | Questions | EX | First-attempt EX | Linking recall |
+|---|---|---|---|---|---|
+| Full pipeline | `openai/gpt-oss-120b` | — | *in progress* | — | — |
+| Without schema linking | `openai/gpt-oss-120b` | — | *planned* | — | — |
+| Without self-correction (1 attempt) | `openai/gpt-oss-120b` | — | *planned* | — | — |
+
+### Run it yourself
+
+1. Download BIRD mini-dev and unpack it so the folder holds `mini_dev_sqlite.json` and
+   `dev_databases/<db_id>/<db_id>.sqlite`.
+2. From the `backend` folder:
+
+```powershell
+python -m benchmarks.bird_eval --data C:\path\to\minidev --limit 100        # random sample (seed 0)
+python -m benchmarks.bird_eval --data C:\path\to\minidev                    # all 500 questions
+python -m benchmarks.bird_eval --data C:\path\to\minidev --no-linking --out benchmarks/results/no_linking.jsonl
+python -m benchmarks.bird_eval --data C:\path\to\minidev --max-attempts 1 --out benchmarks/results/one_attempt.jsonl
+python -m benchmarks.bird_eval --report                                     # re-print a summary
+python -m benchmarks.compare benchmarks/results/a.jsonl benchmarks/results/b.jsonl
+```
+
+Runs are **resumable**: results are appended one line per question, so re-running the same
+command continues where it stopped. When Groq's daily token limit is hit, the run waits for
+quota by default (`--no-wait` stops instead). Other options: `--first N`, `--seed`, and
+`--no-evidence` to leave out BIRD's hints.
+
+---
+
+## Quick start
+
+You need **Python 3.10+**, **Node 20+** and a free **[Groq API key](https://console.groq.com/keys)**.
+
+### 1. Backend
 
 ```powershell
 cd backend
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+.venv\Scripts\Activate.ps1          # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-copy .env.example .env
 ```
 
-Open `backend\.env` and paste your Groq key after `GROQ_API_KEY=`. Then:
+Create `backend\.env`:
+
+```env
+GROQ_API_KEY=your-key-here
+GROQ_MODEL=openai/gpt-oss-120b
+DB_PATH=data/sample.sqlite
+```
 
 ```powershell
-python create_sample_db.py          # only needed if data\sample.sqlite is missing
 uvicorn app.main:app --reload
 ```
 
-The API runs on http://localhost:8000 (interactive docs at http://localhost:8000/docs).
+The API runs at http://localhost:8000, with interactive docs at http://localhost:8000/docs.
 
-If `Activate.ps1` is blocked, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.
-
-### 2. Frontend (terminal 2)
+### 2. Frontend
 
 ```powershell
 cd frontend
@@ -56,91 +163,42 @@ npm install
 npm start
 ```
 
-Open http://localhost:4200 and ask, for example:
+Open **http://localhost:4200** and try:
 
-- Show me the top 5 customers by total revenue
-- Which city has the most orders?
-- Total revenue from customers in Kochi by product category
-- Monthly revenue for 2025
+- *Show me the top 5 customers by total revenue*
+- *Which city has the most orders?*
+- *Total revenue from customers in Kochi by product category*
+- *Monthly revenue for 2025*
 
-### Tests
+The included `data/sample.sqlite` is a small shop database (customers, products, orders).
+To query **your own database**, point `DB_PATH` at any SQLite file and restart the backend.
 
-```powershell
-cd backend
-python -m pytest
-```
+<details>
+<summary><b>Using the UI</b></summary>
 
-The tests cover schema linking (names, stored values, foreign-key bridge tables, names the
-LLM invents), the self-correction loop (repair from an execution error, from the safety
-check, widening the schema, giving up after 3 attempts) and the validator. The LLM is faked,
-so they run offline.
-
-## Using the UI
-
-- The sidebar lists the tables. Click a column name to add it to your question. Tables used
-  by the latest answer are marked LINKED.
-- Each answer shows the agent steps (linked tables, matched values, every SQL attempt and the
-  error that triggered a repair), the explanation, the SQL and the results together.
-- **Edit** on the SQL lets you change the query and run it again (Ctrl+Enter). It goes through
-  the same safety check and read-only connection. **Reset** goes back to the original.
+- The sidebar lists the tables. Click a column to add it to your question. Tables used by the
+  latest answer are marked **LINKED**.
+- Each answer shows the agent steps (linked tables, matched values, every SQL attempt and what
+  triggered a repair), the explanation, the SQL and the results.
+- **Edit** the SQL and re-run it (Ctrl+Enter). It goes through the same validator and
+  read-only connection. **Reset** restores the original.
 - Click a column header to sort. **Copy CSV** / **Download** to export.
-- Keys: Enter sends, Shift+Enter adds a line, Up recalls the last question, / focuses the box.
-- Light and dark themes follow the operating system setting.
+- Keys: Enter sends · Shift+Enter adds a line · ↑ recalls the last question · / focuses the box.
+- Light and dark themes follow your system setting.
 
-## Use your own database
+</details>
 
-Set `DB_PATH` in `backend\.env` to any SQLite file and restart the backend, for example:
-
-```
-DB_PATH=C:\path\to\california_schools.sqlite
-```
-
-## Change the model
-
-Set `GROQ_MODEL` in `backend\.env` to any chat model listed at https://console.groq.com/docs/models.
-
-## Project layout
-
-```
-backend/app/
-  main.py                        FastAPI app + CORS for the Angular dev server
-  config.py                      reads backend/.env
-  api/chat.py                    the endpoints
-  agents/pipeline.py             the agent loop: link, generate, validate, run, repair, explain
-  agents/schema_agent.py         schema -> prompt text (whole, or only the linked tables)
-  agents/schema_linking.py       schema linking: names, stored values, LLM, foreign-key closure
-  agents/sql_agent.py            question (+ earlier failed attempts and their errors) -> SQL
-  agents/explanation_agent.py    results -> plain-English answer
-  database/connection.py         opens SQLite read-only
-  database/schema.py             reads tables, columns, foreign keys, example rows
-  services/llm.py                calls the Groq API
-  services/sql_validator.py      safety check (not AI)
-  services/sql_executor.py       runs the query with a time and row limit
-  models/request.py              request/response shapes
-backend/tests/test_agents.py     tests (offline, fake LLM)
-backend/create_sample_db.py      builds the sample shop database
-
-frontend/src/app/
-  pages/chat/                    the page: sidebar + conversation, consumes the event stream
-  components/agent-trace/        live agent steps: linking, SQL attempts and repairs
-  components/sql-display/        highlighted SQL, copy, edit and re-run
-  components/results-table/      sortable results, single-value view, CSV export
-  components/schema-panel/       tables and columns, linked tables marked
-  components/chat-input/         question box
-  services/sql-ai.service.ts     HTTP + streaming client
-  format.ts                      SQL highlighting, number formatting, small Markdown, CSV
-```
-
-## API
+<details>
+<summary><b>API reference</b></summary>
 
 | Endpoint | What it does |
 |---|---|
-| `GET /schema` | tables, columns, keys, example rows |
-| `POST /chat` `{"question": "..."}` | runs the pipeline, returns the answer |
-| `POST /chat/stream` `{"question": "..."}` | the same, streamed as one JSON event per line |
-| `POST /run-sql` `{"sql": "..."}` | runs user-edited SQL (validated, read-only, no LLM) |
+| `GET /schema` | Tables, columns, keys, example rows |
+| `POST /chat` `{"question": "..."}` | Runs the pipeline and returns the answer |
+| `POST /chat/stream` `{"question": "..."}` | The same, streamed as NDJSON (one event per line) |
+| `POST /run-sql` `{"sql": "..."}` | Runs user-edited SQL (validated, read-only, no LLM) |
 
-`POST /chat` returns:
+Example `POST /chat` response:
 
 ```json
 {
@@ -164,22 +222,96 @@ frontend/src/app/
 }
 ```
 
-A failed attempt looks like `{"n": 1, "sql": "...", "ok": false, "error": "OperationalError: no such column: amout"}`.
-
 Stream events: `status` (a step started), `linking`, `attempt` (one per SQL attempt),
 `widened`, then `result` or `error`.
 
-Errors on `/chat`: `422` if there is no working query after 3 attempts (includes the last SQL
-tried), `502` if the Groq call failed, `500` if the database file is missing.
+Errors on `/chat`: `422` when there is no working query after 3 attempts (includes the last
+SQL tried), `502` when the LLM call fails, `500` when the database file is missing.
+
+</details>
+
+---
 
 ## Safety
 
-The model's SQL (and SQL edited in the UI) is never trusted. Two independent locks:
+The SQL comes from an LLM, so it is treated as **untrusted input**. There are two independent locks:
 
-1. **Validator** (`sql_validator.py`): one statement only, must start with `SELECT` or `WITH`,
-   and whole-word checks block `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`,
-   `ATTACH`, `PRAGMA` and similar. (Whole-word, so a column named `created_at` is fine.)
-2. **Read-only database** (`connection.py`): opened with `mode=ro` and `PRAGMA query_only`,
-   so even a query that got past the validator could not change anything.
+1. **Validator** (`services/sql_validator.py`): exactly one statement, which must start with
+   `SELECT` or `WITH`. Whole-word checks block `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`,
+   `CREATE`, `ATTACH`, `PRAGMA` and similar. Text inside quotes is ignored, so
+   `WHERE note = 'drop'` and columns like `created_at` are fine.
+2. **Read-only database** (`database/connection.py`): opened with `mode=ro` and
+   `PRAGMA query_only`, so even a query that slipped past the validator could not write.
 
-Queries are also stopped after 10 seconds, and at most 500 rows are returned.
+Queries are also stopped after **10 seconds** and capped at **500 rows**. The Explanation Agent
+is told to ignore any instructions found inside result rows (prompt-injection defence).
+
+> **Note:** the app can read every table in the database it is pointed at. For sensitive data,
+> point it at a database or copy that contains only the tables users may query.
+
+---
+
+<details>
+<summary><b>Project structure</b></summary>
+
+```
+backend/
+├── app/
+│   ├── main.py                    FastAPI app + CORS
+│   ├── config.py                  reads backend/.env
+│   ├── api/chat.py                endpoints
+│   ├── agents/
+│   │   ├── pipeline.py            the agent loop: link → generate → validate → run → review → explain
+│   │   ├── schema_agent.py        schema → prompt text (whole, or only linked tables)
+│   │   ├── schema_linking.py      names · stored values · LLM · foreign-key closure
+│   │   ├── sql_agent.py           question + earlier attempts and feedback → SQL
+│   │   ├── verifier.py            checks a result actually answers the question
+│   │   └── explanation_agent.py   results → plain-English answer
+│   ├── database/
+│   │   ├── connection.py          read-only SQLite connection
+│   │   ├── schema.py              tables, columns, keys, example rows
+│   │   └── descriptions.py        optional column documentation (BIRD CSV format)
+│   ├── services/
+│   │   ├── llm.py                 Groq client: retries, rate limits, token counts
+│   │   ├── sql_validator.py       safety check (not AI)
+│   │   └── sql_executor.py        time and row limits
+│   └── models/request.py          request/response shapes
+├── benchmarks/
+│   ├── bird_eval.py               BIRD mini-dev evaluation harness
+│   └── compare.py                 question-by-question diff of two runs
+├── tests/test_agents.py           offline tests with a fake LLM
+└── data/sample.sqlite             sample shop database
+
+frontend/src/app/
+├── pages/chat/                    sidebar + conversation, consumes the event stream
+├── components/
+│   ├── agent-trace/               live agent steps: linking, attempts, repairs
+│   ├── sql-display/               highlighted SQL, copy, edit, re-run
+│   ├── results-table/             sortable results, single-value view, CSV export
+│   ├── schema-panel/              tables and columns, linked tables marked
+│   └── chat-input/                question box
+├── services/sql-ai.service.ts     HTTP + streaming client
+└── format.ts                      SQL highlighting, number formatting, CSV
+```
+
+</details>
+
+---
+
+## Tests
+
+```powershell
+cd backend
+python -m pytest
+```
+
+The tests run **offline with a fake LLM**. They cover schema linking (names, stored values,
+fuzzy matches, foreign-key bridges, invented table names), the self-correction loop (repair
+from an error, from the validator, after an empty result, after a verifier review, schema
+widening, giving up after 3 attempts), column descriptions, and validator edge cases.
+
+---
+
+## Built with
+
+FastAPI · Pydantic · httpx · SQLite · Angular · TypeScript · Groq (`openai/gpt-oss-120b`) · pytest
