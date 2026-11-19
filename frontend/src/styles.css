@@ -1,0 +1,81 @@
+/* Monochrome design: black on white, square corners, hairline borders.
+   Dark mode (from the OS setting) is the exact inverse. */
+:root {
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --subtle: #f5f5f5;
+  --line: #e5e5e5;
+  --line-strong: #000000;
+  --text: #000000;
+  --muted: #6b6b6b;
+  --faint: #a3a3a3;
+  --invert-bg: #000000;
+  --invert-text: #ffffff;
+  --font: 'Inter', 'Helvetica Neue', Helvetica, Arial, system-ui, sans-serif;
+  --mono: 'JetBrains Mono', 'IBM Plex Mono', 'Cascadia Mono', Consolas, monospace;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #000000;
+    --surface: #000000;
+    --subtle: #111111;
+    --line: #262626;
+    --line-strong: #ffffff;
+    --text: #ffffff;
+    --muted: #a3a3a3;
+    --faint: #5c5c5c;
+    --invert-bg: #ffffff;
+    --invert-text: #000000;
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; border-radius: 0 !important; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+}
+button, input, textarea { font: inherit; color: inherit; }
+::selection { background: var(--invert-bg); color: var(--invert-text); }
+:focus-visible { outline: 2px solid var(--line-strong); outline-offset: 2px; }
+
+/* Shared small uppercase label */
+.label {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* Shared buttons */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 30px; padding: 0 12px;
+  border: 1px solid var(--line-strong); background: var(--surface); color: var(--text);
+  font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap;
+  transition: background .12s, color .12s;
+}
+.btn:hover:not(:disabled) { background: var(--invert-bg); color: var(--invert-text); }
+.btn:disabled { opacity: .4; cursor: default; }
+.btn.solid { background: var(--invert-bg); color: var(--invert-text); }
+.btn.solid:hover:not(:disabled) { background: var(--surface); color: var(--text); }
+.btn.quiet { border-color: var(--line); }
+.btn.quiet:hover:not(:disabled) { border-color: var(--line-strong); }
+.btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: square; }
+
+/* Markup inserted with [innerHTML] does not get component-scoped styles. */
+.md strong { font-weight: 650; }
+.md code { font-family: var(--mono); font-size: .86em; padding: 1px 5px; background: var(--subtle); border: 1px solid var(--line); }
+.md ul { margin: 6px 0; padding-left: 20px; }
+.sql .kw { font-weight: 700; }
+.sql .fn { font-weight: 600; text-decoration: underline; text-decoration-color: var(--faint); text-underline-offset: 3px; }
+.sql .str, .sql .num { color: var(--muted); }
