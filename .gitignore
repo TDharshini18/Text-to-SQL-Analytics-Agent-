@@ -1,0 +1,14 @@
+# secrets
+backend/.env
+# python
+__pycache__/
+.venv/
+.pytest_cache/
+# angular
+frontend/node_modules/
+frontend/dist/
+frontend/.angular/
+# benchmark output
+backend/benchmarks/results/
+# local
+CLAUDE.md
