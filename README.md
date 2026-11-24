@@ -97,14 +97,30 @@ when it returns the same set of rows as the reference SQL. Each run also reports
 
 ### Results
 
-<!-- Fill this table from `python -m benchmarks.bird_eval --report` after a completed run.
-     Only report numbers from finished runs, and state the model and date. -->
+Model `openai/gpt-oss-120b` (Groq), schema linking on, up to 3 attempts, BIRD evidence hints on.
+Full run: 499 of 500 questions scored (one reference query cannot be scored).
 
-| Configuration | Model | Questions | EX | First-attempt EX | Linking recall |
-|---|---|---|---|---|---|
-| Full pipeline | `openai/gpt-oss-120b` | — | *in progress* | — | — |
-| Without schema linking | `openai/gpt-oss-120b` | — | *planned* | — | — |
-| Without self-correction (1 attempt) | `openai/gpt-oss-120b` | — | *planned* | — | — |
+| Difficulty | Questions | EX | First attempt |
+|---|---|---|---|
+| Simple | 148 | 77.0% | 75.7% |
+| Moderate | 250 | 57.2% | 55.6% |
+| Challenging | 101 | 52.5% | 52.5% |
+| **Total** | **499** | **62.1%** | **60.9%** |
+
+- **Self-correction:** fixed 6 wrong answers and broke none (+1.2 points).
+- **Schema linking recall:** 97.8% of questions had every needed table linked.
+- **Cost:** about 2.0 LLM calls and 4,400 tokens per question.
+
+**Ablation: does schema linking help?** Same 100 random questions (seed 0), only linking changed.
+
+| Configuration | Questions | EX | First attempt | LLM calls / question |
+|---|---|---|---|---|
+| With schema linking | 100 | 73.0% | 70.0% | 2.04 |
+| Without schema linking | 100 | 71.0% | 66.0% | 1.08 |
+
+Linking adds about 2 points of EX for one extra LLM call per question. With 100 questions the gap is
+small, so read it as a modest gain. Full reports and per-database scores are in
+[`backend/benchmarks/README.md`](backend/benchmarks/README.md).
 
 ### Run it yourself
 
