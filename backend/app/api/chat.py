@@ -32,6 +32,10 @@ def open_db() -> sqlite3.Connection:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+def _history(req: ChatRequest) -> list[dict]:
+    return [t.model_dump() for t in req.history]
+
+
 @router.get("/schema")
 def schema():
     conn = open_db()
@@ -45,7 +49,7 @@ def schema():
 def chat(req: ChatRequest):
     conn = open_db()
     try:
-        for event in run_pipeline(conn, req.question):
+        for event in run_pipeline(conn, req.question, conversation=_history(req)):
             if event["type"] == "result":
                 return event["response"]
         raise HTTPException(status_code=500, detail="The pipeline ended without a result.")
@@ -63,7 +67,7 @@ def chat_stream(req: ChatRequest):
 
     def events() -> Iterator[str]:
         try:
-            for event in run_pipeline(conn, req.question):
+            for event in run_pipeline(conn, req.question, conversation=_history(req)):
                 yield json.dumps(event, default=str) + "\n"
         except PipelineError as e:
             yield json.dumps({"type": "error", "message": e.message, "sql": e.sql}) + "\n"

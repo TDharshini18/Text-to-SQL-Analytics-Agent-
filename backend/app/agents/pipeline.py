@@ -17,12 +17,14 @@ Each step yields an event, so the UI can show the agent's work live (/chat/strea
 and /chat simply runs the generator to the end.
 """
 
+import re
 import sqlite3
 import time
 from collections.abc import Iterator
 
 from app import config
 from app.agents.explanation_agent import explain
+from app.agents.rewrite_agent import rewrite_question
 from app.agents.schema_agent import get_schema, schema_to_text
 from app.agents.schema_linking import LinkResult, build_value_index, category_values, link_schema
 from app.agents.sql_agent import generate_sql
@@ -32,6 +34,11 @@ from app.services.sql_executor import execute_sql
 from app.services.sql_validator import UnsafeSQLError, validate_sql
 
 MAX_ATTEMPTS = 3
+
+NOT_A_QUESTION = (
+    "That doesn't look like a valid question about this database. "
+    "Ask in plain English about the data, and mention what you want to see."
+)
 
 EMPTY_RESULT_FEEDBACK = (
     "The query ran but returned 0 rows. Check each filter: is it on the right column, does "
@@ -56,6 +63,12 @@ def _value_index(conn: sqlite3.Connection, schema: dict) -> list:
     return _value_cache[key]
 
 
+def _reads_a_table(sql: str) -> bool:
+    """False for a query like SELECT 'hello': it has no FROM or JOIN outside string literals."""
+    without_strings = re.sub(r"'[^']*'|\"[^\"]*\"", "", sql)
+    return re.search(r"\b(from|join)\b", without_strings, re.IGNORECASE) is not None
+
+
 class PipelineError(Exception):
     def __init__(self, message: str, sql: str = ""):
         super().__init__(message)
@@ -72,9 +85,20 @@ def run_pipeline(
     use_review: bool = False,
     max_attempts: int = MAX_ATTEMPTS,
     explain_results: bool = True,
+    # Earlier turns ({"question", "sql"}, oldest first) for follow-up questions.
+    conversation: list[dict] | None = None,
 ) -> Iterator[dict]:
     """The options exist for the benchmark (benchmarks/bird_eval.py), to measure each part."""
     started = time.monotonic()
+
+    asked = question
+    if not re.search(r"[^\W\d_]{2}", question):
+        raise PipelineError(NOT_A_QUESTION)
+
+    # 0. Follow-up questions become standalone ones. No history: no extra LLM call.
+    if conversation:
+        yield {"type": "status", "step": "rewriting", "message": "Reading the question in context"}
+        question = rewrite_question(question, conversation)
 
     # 1. Schema (+ documentation and category values, when available)
     yield {"type": "status", "step": "schema", "message": "Reading the database schema"}
@@ -90,6 +114,9 @@ def run_pipeline(
     else:
         all_tables = [t["name"] for t in schema["tables"]]
         link = LinkResult(all_tables, {}, [], {t: ["linking off"] for t in all_tables}, "off")
+    if link.method == "fallback":
+        # Nothing in the question matched a table, column, stored value or the LLM's pick.
+        raise PipelineError(NOT_A_QUESTION)
     link_info = link.to_dict() | {"total_tables": len(schema["tables"])}
     yield {"type": "linking", **link_info}
 
@@ -114,6 +141,9 @@ def run_pipeline(
             "message": "Writing SQL" if n == 1 else f"Revising the query (attempt {n} of {max_attempts})",
         }
         sql = generate_sql(question, schema_text, history)
+        if not _reads_a_table(sql):
+            # e.g. SELECT 'ChatGPT' AS name: the model answered from itself, not the data.
+            raise PipelineError(NOT_A_QUESTION)
         t0 = time.monotonic()
         try:
             validate_sql(sql)
@@ -175,13 +205,14 @@ def run_pipeline(
     yield {
         "type": "result",
         "response": {
-            "question": question,
+            "question": asked,
             "sql": sql,
             "columns": columns,
             "results": rows,
             "explanation": explanation,
             "truncated": len(rows) >= config.MAX_ROWS,
             "trace": {
+                "rewritten_question": question if question != asked else None,
                 "linking": link_info,
                 "attempts": attempts,
                 "widened": widened,

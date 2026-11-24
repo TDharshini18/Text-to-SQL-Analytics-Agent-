@@ -9,7 +9,7 @@ import sqlite3
 import pytest
 
 from app import config
-from app.agents import pipeline, schema_linking
+from app.agents import pipeline, rewrite_agent, schema_linking
 from app.agents.schema_agent import get_schema
 from app.agents.schema_linking import connect_tables, lexical_links, link_schema, value_links
 from app.services.sql_validator import UnsafeSQLError, validate_sql
@@ -254,3 +254,109 @@ def test_result_review_feedback_triggers_a_revision(db, monkeypatch):
 def test_unchanged_query_after_review_is_accepted(db, monkeypatch):
     events, calls = run(db, monkeypatch, ["SELECT name FROM customers"] * 3, review="looks off")
     assert len(calls) == 2  # reviewed once; the model kept its query, so it is accepted
+
+
+# ---------- follow-up questions (conversation memory) ----------
+
+PREVIOUS = [{"question": "total sales by city", "sql": "SELECT city, SUM(amount) FROM orders GROUP BY city"}]
+
+
+def fake_rewrite_llm(question, seen=None):
+    def fake(system_prompt, user_prompt, json_mode=False):
+        if seen is not None:
+            seen.append(user_prompt)
+        return json.dumps({"question": question})
+    return fake
+
+
+def run_follow_up(db, monkeypatch, conversation, rewrite_llm=None):
+    """Run the pipeline; returns the events and the question the SQL agent actually saw."""
+    asked = []
+
+    def fake_generate(question, schema_text, history):
+        asked.append(question)
+        return "SELECT COUNT(*) FROM orders"
+
+    monkeypatch.setattr(schema_linking, "ask_llm", fake_link_llm(["orders"]))
+    monkeypatch.setattr(rewrite_agent, "ask_llm", rewrite_llm or fake_rewrite_llm("unused"))
+    monkeypatch.setattr(pipeline, "generate_sql", fake_generate)
+    monkeypatch.setattr(pipeline, "explain", lambda *a: "explained")
+    events = list(pipeline.run_pipeline(db, "now only 2023", conversation=conversation))
+    return events, asked
+
+
+def test_follow_up_is_rewritten_before_the_sql_agent_sees_it(db, monkeypatch):
+    events, asked = run_follow_up(
+        db, monkeypatch, PREVIOUS, fake_rewrite_llm("total sales by city in 2023")
+    )
+    assert asked == ["total sales by city in 2023"]
+    response = events[-1]["response"]
+    assert response["question"] == "now only 2023"  # what the user typed
+    assert response["trace"]["rewritten_question"] == "total sales by city in 2023"
+
+
+def test_no_history_means_no_rewrite_call(db, monkeypatch):
+    def must_not_run(*a, **k):
+        raise AssertionError("the rewrite agent should not run without history")
+
+    events, asked = run_follow_up(db, monkeypatch, None, must_not_run)
+    assert asked == ["now only 2023"]
+    assert events[-1]["response"]["trace"]["rewritten_question"] is None
+
+
+def test_rewrite_sees_only_the_last_three_turns(monkeypatch):
+    seen = []
+    monkeypatch.setattr(rewrite_agent, "ask_llm", fake_rewrite_llm("q", seen))
+    turns = [{"question": f"question {i}", "sql": "SELECT 1"} for i in range(5)]
+    rewrite_agent.rewrite_question("and now?", turns)
+    assert "question 1" not in seen[0]
+    assert all(f"question {i}" in seen[0] for i in (2, 3, 4))
+
+
+def test_failed_rewrite_falls_back_to_the_original_question(monkeypatch):
+    def broken(*a, **k):
+        raise rewrite_agent.LLMError("down")
+
+    monkeypatch.setattr(rewrite_agent, "ask_llm", broken)
+    assert rewrite_agent.rewrite_question("now only 2023", PREVIOUS) == "now only 2023"
+    monkeypatch.setattr(rewrite_agent, "ask_llm", lambda *a, **k: "not json")
+    assert rewrite_agent.rewrite_question("now only 2023", PREVIOUS) == "now only 2023"
+
+# ---------- nonsense input ----------
+
+def run_nonsense(db, monkeypatch, question, link_llm):
+    def must_not_run(*a, **k):
+        raise AssertionError("the SQL agent should not run for a nonsense question")
+
+    monkeypatch.setattr(schema_linking, "ask_llm", link_llm)
+    monkeypatch.setattr(pipeline, "generate_sql", must_not_run)
+    with pytest.raises(pipeline.PipelineError) as e:
+        list(pipeline.run_pipeline(db, question))
+    return e.value
+
+
+@pytest.mark.parametrize("question", [";;;", "123", "?!  -- 42"])
+def test_input_without_words_is_rejected_without_any_llm_call(db, monkeypatch, question):
+    def no_llm(*a, **k):
+        raise AssertionError("no LLM call expected")
+
+    error = run_nonsense(db, monkeypatch, question, no_llm)
+    assert "valid question" in error.message
+
+
+def test_gibberish_that_matches_nothing_is_rejected(db, monkeypatch):
+    error = run_nonsense(db, monkeypatch, ";khsadgf", fake_link_llm([]))
+    assert "valid question" in error.message
+
+@pytest.mark.parametrize(
+    "sql", ["SELECT 'ChatGPT' AS name", "SELECT 'a table from nowhere' AS answer", "SELECT 1 WHERE 0"]
+)
+def test_query_that_reads_no_table_is_rejected(db, monkeypatch, sql):
+    with pytest.raises(pipeline.PipelineError) as e:
+        run(db, monkeypatch, [sql])
+    assert "valid question" in e.value.message
+
+
+def test_query_with_a_join_or_quoted_table_still_counts_as_reading_a_table():
+    assert pipeline._reads_a_table('SELECT * FROM "order items" JOIN products USING (id)')
+    assert pipeline._reads_a_table("with t as (select 1) select * from t")
