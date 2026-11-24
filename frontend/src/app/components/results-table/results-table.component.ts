@@ -11,6 +11,10 @@ import { formatCell, prettyLabel, toCsv } from '../../format';
       </span>
       @if (rows().length > 0) {
         <div class="actions">
+          @if (chart()) {
+            <button type="button" class="btn quiet" [class.solid]="!showChart()" (click)="view.set('table')">Table</button>
+            <button type="button" class="btn quiet" [class.solid]="showChart()" (click)="view.set('chart')">Chart</button>
+          }
           <button type="button" class="btn quiet" (click)="copyCsv()">{{ copied() ? 'Copied' : 'Copy CSV' }}</button>
           <button type="button" class="btn quiet" (click)="downloadCsv()">Download</button>
         </div>
@@ -23,6 +27,16 @@ import { formatCell, prettyLabel, toCsv } from '../../format';
       <div class="stat">
         <span class="stat-value">{{ fmt(rows()[0][0]) }}</span>
         <span class="stat-label">{{ label(columns()[0]) }}</span>
+      </div>
+    } @else if (showChart()) {
+      <div class="chart" role="img" [attr.aria-label]="'Bar chart of ' + label(columns()[chart()!.valueCol])">
+        @for (b of chart()!.bars; track $index) {
+          <div class="bar-row">
+            <span class="bar-label" [title]="b.label">{{ b.label }}</span>
+            <span class="bar-track"><span class="bar-fill" [style.width.%]="b.pct"></span></span>
+            <span class="bar-value">{{ b.text }}</span>
+          </div>
+        }
       </div>
     } @else {
       <div class="wrap">
@@ -63,6 +77,12 @@ import { formatCell, prettyLabel, toCsv } from '../../format';
     .stat { display: flex; flex-direction: column; gap: 4px; padding: 20px 22px; border: 1px solid var(--line-strong); }
     .stat-value { font-size: 40px; font-weight: 700; letter-spacing: -.03em; line-height: 1; font-variant-numeric: tabular-nums; }
     .stat-label { font-size: 13px; color: var(--muted); }
+    .chart { display: flex; flex-direction: column; gap: 6px; padding: 14px; border: 1px solid var(--line); max-height: 420px; overflow: auto; }
+    .bar-row { display: grid; grid-template-columns: minmax(80px, 200px) 1fr auto; align-items: center; gap: 12px; font-size: 13px; }
+    .bar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bar-track { height: 14px; background: var(--subtle); }
+    .bar-fill { display: block; height: 100%; min-width: 2px; background: var(--text); }
+    .bar-value { font-variant-numeric: tabular-nums; color: var(--muted); }
     .wrap { max-height: 420px; overflow: auto; border: 1px solid var(--line); }
     table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
     th { position: sticky; top: 0; z-index: 1; background: var(--surface); border-bottom: 1px solid var(--line-strong); text-align: left; padding: 0; }
@@ -112,6 +132,29 @@ export class ResultsTableComponent {
       return (typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y))) * s.dir;
     });
   });
+
+  view = signal<'table' | 'chart'>('table');
+
+  // A bar chart needs 2-30 rows, a text column for the labels and a number column for the
+  // bars (first of each), and no negative numbers. Otherwise only the table is offered.
+  chart = computed(() => {
+    const rows = this.sorted();
+    const num = this.numeric();
+    const valueCol = num.indexOf(true);
+    const labelCol = num.indexOf(false);
+    if (rows.length < 2 || rows.length > 30 || valueCol < 0 || labelCol < 0) return null;
+    const values = rows.map((r) => (typeof r[valueCol] === 'number' ? (r[valueCol] as number) : 0));
+    const max = Math.max(...values);
+    if (values.some((v) => v < 0) || max <= 0) return null;
+    const bars = rows.map((r, i) => ({
+      label: r[labelCol] === null || r[labelCol] === undefined ? '(none)' : String(r[labelCol]),
+      pct: (values[i] / max) * 100,
+      text: formatCell(r[valueCol], this.grouped()[valueCol]),
+    }));
+    return { valueCol, bars };
+  });
+
+  showChart = computed(() => this.view() === 'chart' && this.chart() !== null);
 
   fmt = formatCell;
   label = prettyLabel;

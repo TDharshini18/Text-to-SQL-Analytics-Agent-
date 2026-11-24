@@ -27,6 +27,8 @@ runs it on a read-only connection, fixes its own mistakes, and explains the answ
   error, up to 3 attempts. Empty results and a separate **Verifier Agent** also trigger a revision.
 - **Safe by design:** the model's SQL is never trusted. A code-level validator allows only a
   single `SELECT`, and the database is opened **read-only**, with a 10 s time limit and a 500-row cap.
+- **Follow-up questions:** a **Rewrite Agent** turns "now only 2023" into a standalone question
+  using the last 3 turns. The browser keeps the history, so the server stays stateless.
 - **Transparent UI:** every agent step streams live. You can see which tables were linked,
   every SQL attempt and why it was repaired, and edit and re-run the SQL yourself.
 - **Measured:** an evaluation harness for the **BIRD mini-dev** benchmark (execution
@@ -196,6 +198,9 @@ To query **your own database**, point `DB_PATH` at any SQLite file and restart t
   latest answer are marked **LINKED**.
 - Each answer shows the agent steps (linked tables, matched values, every SQL attempt and what
   triggered a repair), the explanation, the SQL and the results.
+- Ask follow-ups like *now only for 2023*: the last 3 questions and their SQL are sent along, and
+  the question is rewritten before the agents see it. **New chat** clears the history.
+- Results with a label column and a number column (2-30 rows) get a **Table / Chart** toggle.
 - **Edit** the SQL and re-run it (Ctrl+Enter). It goes through the same validator and
   read-only connection. **Reset** restores the original.
 - Click a column header to sort. **Copy CSV** / **Download** to export.
@@ -258,6 +263,10 @@ The SQL comes from an LLM, so it is treated as **untrusted input**. There are tw
    `WHERE note = 'drop'` and columns like `created_at` are fine.
 2. **Read-only database** (`database/connection.py`): opened with `mode=ro` and
    `PRAGMA query_only`, so even a query that slipped past the validator could not write.
+
+Input that is not a question about the data is rejected before any SQL runs: text with no
+words (`;;;`), text that matches nothing in the schema (`;khsadgf`), and answers that read no
+table (`SELECT 'hello'`).
 
 Queries are also stopped after **10 seconds** and capped at **500 rows**. The Explanation Agent
 is told to ignore any instructions found inside result rows (prompt-injection defence).
