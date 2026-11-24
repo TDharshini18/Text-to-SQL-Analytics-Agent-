@@ -39,6 +39,43 @@ Linking adds about 2 points of EX and 4 points of first-try accuracy, at the cos
 LLM call per question. With n=100 the gap is small, so treat it as a modest gain, not a proven one.
 The self-correction loop recovers part of the difference: it fixes 5 answers without linking and 3 with it.
 
+## Error analysis
+
+Of the 499 scored questions, 189 were wrong. Every one of them **ran without an error**, so the
+failures are in the logic, not in execution. Only 6 missed a needed table in schema linking.
+The self-correction loop cannot help here: it reacts to errors and empty results, and these
+queries returned plausible rows.
+
+Grouped by how the predicted SQL differs from the reference SQL (a rough classification by
+query shape over 190 rows, which includes the unscorable q701):
+
+| Pattern | Count | What it looks like |
+|---|---|---|
+| Same shape, different logic or values | 83 | a wrong column or filter value, or a different tie-break |
+| Different number of joins | 53 | a table skipped (q408) or one join too many |
+| Missing output columns | 22 | the question asks to list names, but only the number is returned (q77) |
+| Extra output columns | 19 | helper columns added that the reference does not return |
+| Reference has `LIMIT`, prediction does not | 13 | "the school with the highest X" answered with a subquery |
+
+Reading the examples, the errors fall into two groups:
+
+- **Real model mistakes**, such as `SUM(c.id)` where a count was needed (q352) and a missing
+  join (q408).
+- **Differences that depend on BIRD's reference SQL.** For q41 and q82 the two queries differ only
+  in how ties are broken (`ROW_NUMBER` vs `RANK`, `= MAX(...)` vs `LIMIT 1`). For q37 the
+  prediction filters out schools with no test-takers and the reference does not, so they can
+  disagree on NULL handling. Some of the remaining gap comes from choices the question does not
+  settle, not from errors the agent can fix.
+
+`california_schools` is the weakest database (21 wrong) because two tables hold overlapping
+columns (`frpm."School Name"` vs `schools.School`, `School Code` vs `CDSCode`) and the reference
+SQL picks one of them without saying why.
+
+**Not tried yet:** turning on the Verifier Agent (`use_review`) for the weakest databases, and
+few-shot examples of similar questions. Both change the prompts, so each needs a re-run on the
+same 100-question sample to be compared fairly. No prompt change was made from this analysis,
+because a few examples are not enough to justify one.
+
 ## Files
 
 | File | Purpose |
