@@ -7,7 +7,7 @@ import { ResultsTableComponent } from '../../components/results-table/results-ta
 import { SchemaPanelComponent } from '../../components/schema-panel/schema-panel.component';
 import { SqlDisplayComponent } from '../../components/sql-display/sql-display.component';
 import { miniMarkdown } from '../../format';
-import { AgentEvent, Schema, Turn } from '../../models';
+import { AgentEvent, HistoryTurn, Schema, Turn } from '../../models';
 import { SqlAiService } from '../../services/sql-ai.service';
 
 const EXAMPLES = [
@@ -282,7 +282,7 @@ export class ChatComponent {
   private run(id: number, question: string) {
     this.busy.set(true);
     this.scrollToBottom();
-    this.stream = this.api.askStream(question).subscribe({
+    this.stream = this.api.askStream(question, this.historyBefore(id)).subscribe({
       next: (e) => this.onEvent(id, e),
       complete: () => {
         // A stream that ends without a result or an error is still a failure.
@@ -295,6 +295,14 @@ export class ChatComponent {
         this.input().focus();
       },
     });
+  }
+
+  /** The last 3 answered questions before this one, so a follow-up like "now only 2023" has context. */
+  private historyBefore(id: number): HistoryTurn[] {
+    return this.turns()
+      .filter((t) => t.id < id && t.status === 'done' && t.response)
+      .slice(-3)
+      .map((t) => ({ question: t.question, sql: t.response!.sql }));
   }
 
   private onEvent(id: number, e: AgentEvent) {

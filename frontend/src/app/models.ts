@@ -63,6 +63,12 @@ export interface Schema {
   tables: SchemaTable[];
 }
 
+// An earlier question and the SQL that answered it, sent so follow-ups make sense.
+export interface HistoryTurn {
+  question: string;
+  sql: string;
+}
+
 // ---------- UI state ----------
 
 // One question and everything the agents did for it.

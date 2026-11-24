@@ -1,7 +1,7 @@
 import { HttpClient } from '@angular/common/http';
 import { Injectable, inject } from '@angular/core';
 import { Observable } from 'rxjs';
-import { AgentEvent, RunSqlResponse, Schema } from '../models';
+import { AgentEvent, HistoryTurn, RunSqlResponse, Schema } from '../models';
 
 // Talks to the FastAPI backend.
 const API_URL = 'http://localhost:8000';
@@ -19,7 +19,7 @@ export class SqlAiService {
   }
 
   /** Streams the agent's steps (one JSON object per line) as they happen. */
-  askStream(question: string): Observable<AgentEvent> {
+  askStream(question: string, history: HistoryTurn[] = []): Observable<AgentEvent> {
     return new Observable<AgentEvent>((sub) => {
       const ctrl = new AbortController();
       (async () => {
@@ -28,7 +28,7 @@ export class SqlAiService {
           res = await fetch(`${API_URL}/chat/stream`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ question }),
+            body: JSON.stringify({ question, history }),
             signal: ctrl.signal,
           });
         } catch {
