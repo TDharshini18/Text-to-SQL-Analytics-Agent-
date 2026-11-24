@@ -25,7 +25,7 @@ import re
 import sqlite3
 import sys
 import time
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 
 from app import config

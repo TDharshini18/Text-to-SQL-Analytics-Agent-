@@ -323,6 +323,26 @@ frontend/src/app/
 
 ---
 
+## Project structure
+
+```
+backend/
+  app/
+    agents/       schema, schema linking, rewrite, SQL, verifier, explanation agents + pipeline.py
+    api/          FastAPI endpoints (/chat, /chat/stream, /run-sql, /schema)
+    database/     read-only connection, schema reader, column descriptions
+    services/     LLM client, SQL validator, SQL executor
+    models/       request and response shapes
+  benchmarks/     BIRD mini-dev evaluation harness (not needed to run the app)
+  tests/          offline tests with a faked LLM
+  data/           sample.sqlite
+frontend/
+  src/app/
+    pages/        the chat page
+    components/   agent trace, chat input, results table, schema panel, SQL display
+    services/     API client
+```
+
 ## Tests
 
 ```powershell
