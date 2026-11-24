@@ -109,7 +109,7 @@ def run(db, monkeypatch, replies, link_tables=("orders",), review=None):
     monkeypatch.setattr(pipeline, "generate_sql", fake_generate)
     monkeypatch.setattr(pipeline, "explain", lambda *a: "explained")
     monkeypatch.setattr(pipeline, "review_result", lambda *a: review)
-    return list(pipeline.run_pipeline(db, "total sales")), calls
+    return list(pipeline.run_pipeline(db, "total sales", use_review=review is not None)), calls
 
 
 def test_repairs_a_failing_query_using_the_database_error(db, monkeypatch):

@@ -1,6 +1,6 @@
 """Compare two benchmark result files question by question, and show the misses of the second.
 
-  python -m benchmarks.compare results/v1/bird_minidev.jsonl results/tune_r1.jsonl
+  python -m benchmarks.compare results/v1/bird_minidev.jsonl results/tuning/tune_r1.jsonl
 """
 
 import json

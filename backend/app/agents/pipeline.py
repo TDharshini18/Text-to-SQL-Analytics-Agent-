@@ -68,7 +68,8 @@ def run_pipeline(
     question: str,
     *,
     use_linking: bool = True,
-    use_review: bool = True,
+    # Off by default: on BIRD (first 20 questions) it doubled the cost and fixed nothing.
+    use_review: bool = False,
     max_attempts: int = MAX_ATTEMPTS,
     explain_results: bool = True,
 ) -> Iterator[dict]:

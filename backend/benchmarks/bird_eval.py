@@ -36,6 +36,9 @@ from app.services import llm
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DATA = BACKEND_DIR.parent.parent / "SQL_AI" / "data" / "bird" / "dev"
 EVAL_TIMEOUT_S = 30  # same as the official BIRD evaluation
+# A few gold (reference) queries are slow on a normal PC (q518 takes ~4 minutes). They are the
+# reference, so they get as long as they need; the prediction then gets at least as long.
+GOLD_TIMEOUT_S = 600
 
 
 # ---------- execution and comparison ----------
@@ -87,6 +90,7 @@ def evaluate(item: dict, db_path: Path, args) -> dict:
                 conn,
                 question,
                 use_linking=args.linking,
+                use_review=args.review,
                 max_attempts=args.max_attempts,
                 explain_results=False,
             ):
@@ -102,13 +106,24 @@ def evaluate(item: dict, db_path: Path, args) -> dict:
             # Out of quota or API down: never record this as a wrong answer; the caller decides.
             raise
 
-        gold = run_sql(conn, item["SQL"])
+        t0 = time.monotonic()
+        try:
+            gold = run_sql(conn, item["SQL"], GOLD_TIMEOUT_S)
+        except sqlite3.Error as e:
+            # The reference itself cannot be run: leave this question out of the score.
+            record.update(scoring_error=f"gold SQL failed: {e}", pred_sql=pred_sql, attempts=attempts,
+                          correct=False, first_attempt_correct=False,
+                          tokens=(llm.usage["prompt_tokens"] - before["prompt_tokens"])
+                          + (llm.usage["completion_tokens"] - before["completion_tokens"]),
+                          seconds=round(time.monotonic() - started, 2))
+            return record
+        pred_timeout = max(EVAL_TIMEOUT_S, 2 * (time.monotonic() - t0))
 
         def is_correct(sql: str | None) -> bool:
             if sql is None:
                 return False
             try:
-                return same_result(run_sql(conn, sql), gold)
+                return same_result(run_sql(conn, sql, pred_timeout), gold)
             except sqlite3.Error:
                 return False
 
@@ -161,13 +176,15 @@ def evaluate_with_quota_waits(item: dict, db_path: Path, args) -> dict:
             return evaluate(item, db_path, args)
         except llm.LLMError as e:
             wait = quota_wait_seconds(str(e))
+            if wait is None and "Could not reach the Groq API" in str(e):
+                wait = 120.0  # no internet: wait and try again instead of stopping
             if wait is None or not args.wait:
                 raise SystemExit(
                     f"\nLLM error on question {item['question_id']}: {e}\n"
                     "Nothing was recorded for it. Re-run the same command to resume."
                 )
-            print(f"    daily token limit reached, waiting {wait / 60:.1f} min "
-                  f"({time.strftime('%H:%M')})", flush=True)
+            reason = "no internet connection" if "Could not reach" in str(e) else "daily token limit reached"
+            print(f"    {reason}, waiting {wait / 60:.1f} min ({time.strftime('%H:%M')})", flush=True)
             time.sleep(wait)
     raise SystemExit("Gave up waiting for quota.")
 
@@ -179,10 +196,16 @@ def pct(n: int, d: int) -> str:
 
 
 def summarize(records: list[dict], label: str) -> str:
+    skipped = [r for r in records if r.get("scoring_error")]
+    records = [r for r in records if not r.get("scoring_error")]
     n = len(records)
     if not n:
         return "No results yet."
-    lines = [f"BIRD mini-dev (SQLite) - {label}", f"Questions evaluated: {n}", ""]
+    lines = [f"BIRD mini-dev (SQLite) - {label}", f"Questions evaluated: {n}"]
+    if skipped:
+        lines.append(f"Left out (reference SQL could not be scored): {len(skipped)} - "
+                     + ", ".join(f"q{r['question_id']}" for r in skipped))
+    lines.append("")
 
     by_diff = defaultdict(list)
     for r in records:
@@ -201,13 +224,16 @@ def summarize(records: list[dict], label: str) -> str:
     lines.append("")
 
     failed = [r for r in records if r["attempts"] and not r["attempts"][0]["ok"]]
-    empty = [r for r in records if r["attempts"] and r["attempts"][0].get("note")]
+    notes = [r["attempts"][0].get("note", "") for r in records if r["attempts"]]
+    empty = [x for x in notes if x.startswith("Returned no rows")]
+    reviewed = [x for x in notes if x.startswith("Result review")]
     fixed = [r for r in records if r["correct"] and not r["first_attempt_correct"]]
     broken = [r for r in records if r["first_attempt_correct"] and not r["correct"]]
     no_sql = [r for r in records if r["pred_sql"] is None]
     lines.append("Self-correction")
     lines.append(f"  attempt 1 failed to execute:     {len(failed)} ({pct(len(failed), n)})")
-    lines.append(f"  attempt 1 returned no rows:      {len(empty)} (sent back for review)")
+    lines.append(f"  attempt 1 returned no rows:      {len(empty)} (sent back to check filters)")
+    lines.append(f"  attempt 1 flagged by review:     {len(reviewed)}")
     lines.append(f"  wrong -> right after the loop:   {len(fixed)}")
     lines.append(f"  right -> wrong after the loop:   {len(broken)}")
     lines.append(f"  still no working SQL after loop: {len(no_sql)}")
@@ -253,6 +279,7 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--no-linking", dest="linking", action="store_false", help="ablation: send the full schema")
     p.add_argument("--max-attempts", type=int, default=pipeline.MAX_ATTEMPTS)
+    p.add_argument("--review", action="store_true", help="turn on the result-verifier agent")
     p.add_argument("--no-evidence", dest="evidence", action="store_false", help="leave out BIRD's evidence hints")
     p.add_argument("--out", type=Path, default=BACKEND_DIR / "benchmarks" / "results" / "bird_minidev.jsonl")
     p.add_argument("--report", action="store_true", help="only print the summary of --out")
@@ -262,7 +289,8 @@ def main():
 
     label = (
         f"model {config.GROQ_MODEL}, linking {'on' if args.linking else 'off'}, "
-        f"max attempts {args.max_attempts}, evidence {'on' if args.evidence else 'off'}"
+        f"max attempts {args.max_attempts}, review {'on' if args.review else 'off'}, "
+        f"evidence {'on' if args.evidence else 'off'}"
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     done = {}
@@ -290,11 +318,20 @@ def main():
         for i, item in enumerate(todo, 1):
             db_path = args.data / "dev_databases" / item["db_id"] / f"{item['db_id']}.sqlite"
             config.DB_PATH = db_path  # the pipeline caches the value index per database file
-            r = evaluate_with_quota_waits(item, db_path, args)
+            try:
+                r = evaluate_with_quota_waits(item, db_path, args)
+            except (SystemExit, KeyboardInterrupt):
+                raise
+            except Exception as e:  # one bad question must not stop a multi-day run
+                r = {"question_id": item["question_id"], "db_id": item["db_id"], "difficulty": item["difficulty"],
+                     "question": item["question"], "gold_sql": item["SQL"], "pred_sql": None, "attempts": [],
+                     "correct": False, "first_attempt_correct": False,
+                     "scoring_error": f"{type(e).__name__}: {e}", "tokens": 0, "seconds": 0}
+                print(f"    scoring error on q{item['question_id']}: {r['scoring_error']}", flush=True)
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
             f.flush()
             done[r["question_id"]] = r
-            mark = "OK " if r["correct"] else ("ERR" if r["pred_sql"] is None else "-- ")
+            mark = "SKP" if r.get("scoring_error") else "OK " if r["correct"] else ("ERR" if r["pred_sql"] is None else "-- ")
             print(
                 f"[{i}/{len(todo)}] {mark} q{r['question_id']:<5} {r['db_id'][:22]:22} {r['difficulty'][:4]} "
                 f"attempts={len(r['attempts'])} tokens={r['tokens']:,} {r['seconds']}s",
